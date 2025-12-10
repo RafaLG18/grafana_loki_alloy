@@ -684,7 +684,7 @@ datasources:
       type: loki
       url: http://my-loki-gateway.loki.svc.cluster.local/
       access: proxy
-      isDefault: false
+      isDefault: true
 #    - name: Prometheus
 #      type: prometheus
 #      url: http://prometheus-prometheus-server

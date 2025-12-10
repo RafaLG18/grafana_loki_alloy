@@ -4,15 +4,14 @@
 # Script de Deploy do Stack Grafana + Loki + Alloy no Kubernetes
 #
 # Este script faz o deploy na seguinte ordem:
-# 1. Loki (Backend de logs)
-# 2. Grafana (Visualização)
-# 3. Alloy (Agente de coleta)
+# 1. Loki (namespace: loki)
+# 2. Grafana (namespace: grafana)
+# 3. Alloy (namespace: alloy)
 #
 # Uso: ./deploy-k8s.sh [OPTIONS]
 #
 # Options:
 #   --with-minio    Usa o values-minio.yaml para o Loki (inclui MinIO)
-#   --namespace     Define o namespace (padrão: observability)
 #   --dry-run       Simula o deploy sem aplicar as mudanças
 #   --help          Mostra esta mensagem de ajuda
 ################################################################################
@@ -26,8 +25,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configurações padrão
-NAMESPACE="observability"
+# Configurações - Namespaces fixos
+LOKI_NAMESPACE="loki"
+GRAFANA_NAMESPACE="grafana"
+ALLOY_NAMESPACE="alloy"
+
 USE_MINIO=false
 DRY_RUN=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,19 +64,22 @@ show_help() {
     cat << EOF
 Script de Deploy do Stack Grafana + Loki + Alloy no Kubernetes
 
+Namespaces utilizados:
+  - Loki:    loki
+  - Grafana: grafana
+  - Alloy:   alloy
+
 Uso: ./deploy-k8s.sh [OPTIONS]
 
 Options:
   --with-minio      Usa o values-minio.yaml para o Loki (inclui MinIO)
-  --namespace NAME  Define o namespace (padrão: observability)
   --dry-run         Simula o deploy sem aplicar as mudanças
   --help            Mostra esta mensagem de ajuda
 
 Exemplos:
-  ./deploy-k8s.sh                           # Deploy padrão
-  ./deploy-k8s.sh --with-minio              # Deploy com MinIO
-  ./deploy-k8s.sh --namespace monitoring    # Deploy no namespace 'monitoring'
-  ./deploy-k8s.sh --dry-run                 # Simula o deploy
+  ./deploy-k8s.sh                  # Deploy padrão
+  ./deploy-k8s.sh --with-minio     # Deploy com MinIO
+  ./deploy-k8s.sh --dry-run        # Simula o deploy
 
 EOF
     exit 0
@@ -86,10 +91,6 @@ while [[ $# -gt 0 ]]; do
         --with-minio)
             USE_MINIO=true
             shift
-            ;;
-        --namespace)
-            NAMESPACE="$2"
-            shift 2
             ;;
         --dry-run)
             DRY_RUN="--dry-run"
@@ -167,20 +168,51 @@ setup_helm_repos() {
     print_success "Repositórios configurados"
 }
 
-# Criar namespace
-create_namespace() {
-    print_header "Criando Namespace"
+# Criar namespaces
+create_namespaces() {
+    print_header "Criando Namespaces"
 
-    if kubectl get namespace "$NAMESPACE" &> /dev/null; then
-        print_warning "Namespace '$NAMESPACE' já existe"
-    else
-        if [ -z "$DRY_RUN" ]; then
-            kubectl create namespace "$NAMESPACE"
-            print_success "Namespace '$NAMESPACE' criado"
+    for NS in "$LOKI_NAMESPACE" "$GRAFANA_NAMESPACE" "$ALLOY_NAMESPACE"; do
+        if kubectl get namespace "$NS" &> /dev/null; then
+            print_warning "Namespace '$NS' já existe"
         else
-            print_info "[DRY-RUN] Criaria o namespace '$NAMESPACE'"
+            if [ -z "$DRY_RUN" ]; then
+                kubectl create namespace "$NS"
+                print_success "Namespace '$NS' criado"
+            else
+                print_info "[DRY-RUN] Criaria o namespace '$NS'"
+            fi
         fi
-    fi
+    done
+}
+
+# Limpar recursos órfãos
+cleanup_orphaned_resources() {
+    print_header "Limpando Recursos Órfãos"
+
+    # Lista de recursos para verificar e limpar
+    local RESOURCES=(
+        "clusterrole:my-loki-clusterrole"
+        "clusterrolebinding:my-loki-clusterrolebinding"
+        "clusterrole:my-alloy"
+        "clusterrolebinding:my-alloy"
+    )
+
+    for RESOURCE in "${RESOURCES[@]}"; do
+        local TYPE="${RESOURCE%%:*}"
+        local NAME="${RESOURCE##*:}"
+
+        if kubectl get "$TYPE" "$NAME" &> /dev/null; then
+            print_warning "Removendo recurso órfão: $TYPE/$NAME"
+            if [ -z "$DRY_RUN" ]; then
+                kubectl delete "$TYPE" "$NAME" || print_warning "Falha ao remover $TYPE/$NAME"
+            else
+                print_info "[DRY-RUN] Removeria $TYPE/$NAME"
+            fi
+        fi
+    done
+
+    print_success "Limpeza de recursos órfãos concluída"
 }
 
 # Deploy do Loki
@@ -195,11 +227,11 @@ deploy_loki() {
         LOKI_VALUES="$SCRIPT_DIR/loki/values-minio.yaml"
     fi
 
-    print_info "Instalando Loki no namespace '$NAMESPACE'..."
+    print_info "Instalando Loki no namespace '$LOKI_NAMESPACE'..."
 
     if [ -z "$DRY_RUN" ]; then
         helm upgrade --install "$RELEASE_NAME" grafana/loki \
-            --namespace "$NAMESPACE" \
+            --namespace "$LOKI_NAMESPACE" \
             --values "$LOKI_VALUES" \
             --wait \
             --timeout 10m
@@ -209,13 +241,13 @@ deploy_loki() {
         print_info "Aguardando pods do Loki ficarem prontos..."
         kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/instance="$RELEASE_NAME" \
-            -n "$NAMESPACE" \
+            -n "$LOKI_NAMESPACE" \
             --timeout=300s || print_warning "Timeout aguardando pods do Loki (pode estar normal se usar StatefulSet)"
 
         print_success "Loki está pronto"
     else
         helm upgrade --install "$RELEASE_NAME" grafana/loki \
-            --namespace "$NAMESPACE" \
+            --namespace "$LOKI_NAMESPACE" \
             --values "$LOKI_VALUES" \
             --dry-run --debug
         print_info "[DRY-RUN] Loki seria instalado"
@@ -229,11 +261,11 @@ deploy_grafana() {
     local GRAFANA_VALUES="$SCRIPT_DIR/helm/values.yaml"
     local RELEASE_NAME="my-grafana"
 
-    print_info "Instalando Grafana no namespace '$NAMESPACE'..."
+    print_info "Instalando Grafana no namespace '$GRAFANA_NAMESPACE'..."
 
     if [ -z "$DRY_RUN" ]; then
         helm upgrade --install "$RELEASE_NAME" grafana/grafana \
-            --namespace "$NAMESPACE" \
+            --namespace "$GRAFANA_NAMESPACE" \
             --values "$GRAFANA_VALUES" \
             --wait \
             --timeout 10m
@@ -243,13 +275,13 @@ deploy_grafana() {
         print_info "Aguardando pods do Grafana ficarem prontos..."
         kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=grafana \
-            -n "$NAMESPACE" \
+            -n "$GRAFANA_NAMESPACE" \
             --timeout=300s
 
         print_success "Grafana está pronto"
     else
         helm upgrade --install "$RELEASE_NAME" grafana/grafana \
-            --namespace "$NAMESPACE" \
+            --namespace "$GRAFANA_NAMESPACE" \
             --values "$GRAFANA_VALUES" \
             --dry-run --debug
         print_info "[DRY-RUN] Grafana seria instalado"
@@ -263,11 +295,11 @@ deploy_alloy() {
     local ALLOY_VALUES="$SCRIPT_DIR/alloy/values.yaml"
     local RELEASE_NAME="my-alloy"
 
-    print_info "Instalando Alloy no namespace '$NAMESPACE'..."
+    print_info "Instalando Alloy no namespace '$ALLOY_NAMESPACE'..."
 
     if [ -z "$DRY_RUN" ]; then
         helm upgrade --install "$RELEASE_NAME" grafana/alloy \
-            --namespace "$NAMESPACE" \
+            --namespace "$ALLOY_NAMESPACE" \
             --values "$ALLOY_VALUES" \
             --wait \
             --timeout 10m
@@ -277,13 +309,13 @@ deploy_alloy() {
         print_info "Aguardando pods do Alloy ficarem prontos..."
         kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=alloy \
-            -n "$NAMESPACE" \
+            -n "$ALLOY_NAMESPACE" \
             --timeout=300s || print_warning "Timeout aguardando pods do Alloy (pode estar normal se usar DaemonSet)"
 
         print_success "Alloy está pronto"
     else
         helm upgrade --install "$RELEASE_NAME" grafana/alloy \
-            --namespace "$NAMESPACE" \
+            --namespace "$ALLOY_NAMESPACE" \
             --values "$ALLOY_VALUES" \
             --dry-run --debug
         print_info "[DRY-RUN] Alloy seria instalado"
@@ -299,41 +331,34 @@ show_access_info() {
         return
     fi
 
-    print_info "Namespace: $NAMESPACE"
     echo ""
 
     # Informações do Grafana
-    print_info "=== GRAFANA ==="
+    print_info "=== GRAFANA (namespace: $GRAFANA_NAMESPACE) ==="
     print_info "Para acessar o Grafana, execute:"
     echo ""
-    echo "  kubectl port-forward -n $NAMESPACE svc/my-grafana 3000:80"
+    echo "  kubectl port-forward -n $GRAFANA_NAMESPACE svc/my-grafana 3000:80"
     echo ""
     print_info "Então acesse: http://localhost:3000"
     echo ""
     print_info "Credenciais do Grafana:"
     echo "  Usuário: admin"
     echo -n "  Senha: "
-    kubectl get secret --namespace "$NAMESPACE" my-grafana -o jsonpath="{.data.admin-password}" 2>/dev/null | base64 --decode || echo "N/A (verifique o secret manualmente)"
+    kubectl get secret --namespace "$GRAFANA_NAMESPACE" my-grafana -o jsonpath="{.data.admin-password}" 2>/dev/null | base64 --decode || echo "N/A (verifique o secret manualmente)"
     echo ""
     echo ""
 
     # Informações do Loki
-    print_info "=== LOKI ==="
+    print_info "=== LOKI (namespace: $LOKI_NAMESPACE) ==="
     print_info "Endpoint do Loki (interno do cluster):"
-    echo "  http://my-loki-gateway.$NAMESPACE.svc.cluster.local"
+    echo "  http://my-loki-gateway.$LOKI_NAMESPACE.svc.cluster.local"
     echo ""
 
     if [ "$USE_MINIO" = true ]; then
         print_info "=== MINIO (Console) ==="
         print_info "Para acessar o console do MinIO:"
-        MINIO_CONSOLE_PORT=$(kubectl get svc -n "$NAMESPACE" -l app=minio -o jsonpath='{.items[0].spec.ports[?(@.name=="http-console")].nodePort}' 2>/dev/null || echo "N/A")
-        if [ "$MINIO_CONSOLE_PORT" != "N/A" ]; then
-            echo "  NodePort: $MINIO_CONSOLE_PORT"
-            echo "  Acesse: http://<NODE-IP>:$MINIO_CONSOLE_PORT"
-        else
-            echo "  kubectl port-forward -n $NAMESPACE svc/my-loki-minio-console 9001:9001"
-            echo "  Acesse: http://localhost:9001"
-        fi
+        echo "  kubectl port-forward -n $LOKI_NAMESPACE svc/my-loki-minio-console 9001:9001"
+        echo "  Acesse: http://localhost:9001"
         echo ""
         print_info "Credenciais do MinIO:"
         echo "  Usuário: root-user"
@@ -342,15 +367,23 @@ show_access_info() {
     fi
 
     # Informações do Alloy
-    print_info "=== ALLOY ==="
+    print_info "=== ALLOY (namespace: $ALLOY_NAMESPACE) ==="
     print_info "O Alloy está coletando logs e enviando para o Loki"
     print_info "Para verificar o status dos pods do Alloy:"
-    echo "  kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=alloy"
+    echo "  kubectl get pods -n $ALLOY_NAMESPACE -l app.kubernetes.io/name=alloy"
     echo ""
 
     # Status geral
     print_info "=== STATUS DOS PODS ==="
-    kubectl get pods -n "$NAMESPACE"
+    echo ""
+    echo "Loki:"
+    kubectl get pods -n "$LOKI_NAMESPACE"
+    echo ""
+    echo "Grafana:"
+    kubectl get pods -n "$GRAFANA_NAMESPACE"
+    echo ""
+    echo "Alloy:"
+    kubectl get pods -n "$ALLOY_NAMESPACE"
     echo ""
 
     print_success "Deploy concluído com sucesso!"
@@ -364,13 +397,17 @@ main() {
         print_warning "Modo DRY-RUN ativado - nenhuma mudança será aplicada"
     fi
 
-    print_info "Namespace: $NAMESPACE"
+    print_info "Namespaces:"
+    echo "  - Loki:    $LOKI_NAMESPACE"
+    echo "  - Grafana: $GRAFANA_NAMESPACE"
+    echo "  - Alloy:   $ALLOY_NAMESPACE"
     print_info "Usar MinIO: $USE_MINIO"
     echo ""
 
     check_prerequisites
     setup_helm_repos
-    create_namespace
+    cleanup_orphaned_resources
+    create_namespaces
 
     # Deploy na ordem correta
     deploy_loki

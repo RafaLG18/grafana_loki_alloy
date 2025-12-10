@@ -35,16 +35,10 @@ alloy:
     # -- Content to assign to the new ConfigMap.  This is passed into `tpl` allowing for templating from values.
     content: |
       loki.write "default" {
-          endpoint {
-            url = "http://my-loki-gateway.loki.svc.cluster.local/loki/api/v1/push"
-            
-            // Opcional: autenticação
-            // basic_auth {
-            //   username = "user"
-            //   password = "pass"
-            // }
-          }
+        endpoint {
+          url = "http://my-loki-gateway.loki.svc.cluster.local/loki/api/v1/push"
         }
+      }
 
     # -- Name of existing ConfigMap to use. Used when create is false.
     name: null
