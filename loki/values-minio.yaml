@@ -1,0 +1,128 @@
+# Configuração do MinIO para uso com Loki em cluster Kubernetes local
+# Para instalar: helm install loki grafana/loki -f values-minio.yaml
+
+minio:
+  # Habilita o MinIO como subchart
+  enabled: true
+
+  # Número de réplicas (1 é suficiente para ambiente local)
+  replicas: 1
+
+  # MinIO requer 2 a 16 drives para erasure code
+  # Com 1 réplica, precisamos de pelo menos 2 drives
+  drivesPerNode: 2
+
+  # Credenciais do usuário root do MinIO
+  rootUser: root-user
+  rootPassword: supersecretpassword
+
+  # Usuário para autenticação do Loki
+  # O primeiro usuário da lista é usado para autenticação Loki/GEL
+  users:
+    - accessKey: loki
+      secretKey: lokisupersecret
+      policy: readwrite
+
+  # Buckets necessários para o Loki
+  buckets:
+    - name: chunks
+      policy: none
+      purge: false
+    - name: ruler
+      policy: none
+      purge: false
+    - name: admin
+      policy: none
+      purge: false
+
+  # Configuração de persistência
+  persistence:
+    enabled: true
+    size: 10Gi
+    # Para ambiente local, você pode usar storageClass padrão
+    # storageClass: "standard"
+    annotations: {}
+
+  # Recursos para ambiente local (ajuste conforme necessário)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Configuração de serviço
+  service:
+    type: ClusterIP
+    port: 9000
+
+  # Console do MinIO (interface web)
+  consoleService:
+    enabled: true
+    type: NodePort
+    port: 9001
+
+# Configuração do Loki para usar o MinIO como backend S3
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  # Configuração do schema de armazenamento
+  # TSDB (v13) é o schema mais recente e recomendado
+  schemaConfig:
+    configs:
+      - from: 2024-01-01
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  storage:
+    type: s3
+    bucketNames:
+      chunks: chunks
+      ruler: ruler
+      admin: admin
+    s3:
+      # O endpoint será automaticamente configurado para o serviço MinIO
+      endpoint: '{{ include "loki.minio.endpoint" . }}'
+      secretAccessKey: lokisupersecret
+      accessKeyId: loki
+      s3ForcePathStyle: true
+      insecure: true
+      # Região (não importa muito para MinIO local)
+      region: us-east-1
+
+# Configuração do Write (componente que escreve dados)
+write:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+
+# Configuração do Read (componente que lê dados)
+read:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+
+# Configuração do Backend (componente de backend)
+backend:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+
+# Gateway (opcional, mas recomendado)
+gateway:
+  enabled: true
+  replicas: 1
+  service:
+    type: NodePort
+    port: 80
